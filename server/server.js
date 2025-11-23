@@ -26,7 +26,6 @@ pool.query("SELECT NOW()", (err, result) => {
 });
 
 const app = express();
-app.use('/uploads', express.static('uploads'));
 app.use(cors({
   origin: "http://localhost:5500",
   credentials: true,
@@ -748,56 +747,211 @@ app.post("/api/bookings", authorize(['guest', 'staff', 'admin']), async (req, re
   }
 });
 
-// ===== API LẤY LỊCH SỬ ĐẶT PHÒNG (FIX) =====
+// =============================================================
+// ===== 1. API LẤY LỊCH SỬ ĐẶT PHÒNG USER (ĐÃ NÂNG CẤP XỬ LÝ ẢNH) =====
+// =============================================================
 app.get("/api/my-bookings", authorize(['guest']), async (req, res) => {
   const { userId } = req.user;
-
   try {
     const sql = `
       SELECT 
-        b.id,
-        b.booking_code,
-        b.check_in,
-        b.check_out,
-        b.total_amount,
-        b.status,
-        res.name AS resort_name,
-        rd.images_url
+        b.id, b.booking_code, b.check_in, b.check_out, b.total_amount, b.status, b.created_at,
+        COALESCE(res.name, 'Resort không tồn tại') AS resort_name,
+        rd.images_url -- Lấy nguyên gốc để xử lý kỹ
       FROM bookings b
-      JOIN rooms r ON b.room_id = r.id
-      JOIN resorts res ON r.resort_id = res.id
+      LEFT JOIN rooms r ON b.room_id = r.id
+      LEFT JOIN resorts res ON r.resort_id = res.id
       LEFT JOIN room_details rd ON r.id = rd.room_id
       WHERE b.user_id = $1
-      ORDER BY b.created_at DESC;
-    `;
+      ORDER BY b.created_at DESC`;
+      
     const { rows } = await pool.query(sql, [userId]);
-    res.status(200).json(rows);
 
+    const processed = rows.map(item => {
+        let imgs = [];
+        const raw = item.images_url;
+
+        if (raw) {
+            try {
+                // Cách 1: Thử Parse JSON chuẩn (ví dụ: '["a.jpg", "b.jpg"]')
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) imgs = parsed;
+                else if (typeof parsed === 'string') imgs = [parsed];
+            } catch (e) {
+                // Cách 2: Nếu lỗi JSON, thử xử lý chuỗi Postgres (ví dụ: '{a.jpg,b.jpg}')
+                if (typeof raw === 'string') {
+                    // Xóa sạch các ký tự ngoặc nhọn, ngoặc vuông, nháy kép
+                    let cleaned = raw.replace(/[{}"\\[\]]/g, '');
+                    // Tách dấu phẩy nếu có
+                    if (cleaned.includes(',')) {
+                        imgs = cleaned.split(',').map(x => x.trim());
+                    } else if (cleaned.trim() !== '') {
+                        imgs = [cleaned.trim()];
+                    }
+                }
+            }
+        }
+
+        // Lọc bỏ ảnh rỗng và xóa đường dẫn thừa nếu có
+        item.images_url = imgs
+            .filter(i => i && i.trim() !== '')
+            .map(i => {
+                // Nếu tên file lỡ có dính chữ "uploads/" thì xóa đi để tránh trùng lặp
+                return i.replace(/^uploads\//, '').replace(/^\/uploads\//, '');
+            });
+
+        return item;
+    });
+
+    res.json(processed);
   } catch (error) {
-    console.error("❌ Lỗi khi lấy lịch sử đặt phòng:", error);
-    res.status(500).json({ error: "Lỗi server khi lấy lịch sử đặt phòng." });
+    console.error("❌ Lỗi lấy booking:", error);
+    res.status(500).json({ error: "Lỗi server" });
   }
 });
 
+// =============================================================
+// ===== 1. API LẤY DANH SÁCH CHO ADMIN (FIX LỖI UNDEFINED TÊN) =====
+// =============================================================
+app.get("/api/admin/bookings", authorize(["admin", "staff"]), async (req, res) => {
+  try {
+    const sql = `
+      SELECT 
+        b.id, 
+        b.booking_code, 
+        b.created_at, 
+        b.check_in, 
+        b.check_out, 
+        b.total_amount, 
+        b.status,
+        -- FIX LỖI UNDEFINED: Nếu full_name null thì lấy username, nếu null nữa thì lấy 'Khách'
+        COALESCE(u.full_name, u.username, 'Khách ẩn danh') AS customer_name,
+        COALESCE(u.phone, '---') AS customer_phone,
+        COALESCE(res.name, 'Resort đã xóa') AS resort_name,
+        COALESCE(rt.name, 'Phòng đã xóa') AS room_type
+      FROM bookings b
+      LEFT JOIN users u ON b.user_id = u.id
+      LEFT JOIN rooms r ON b.room_id = r.id
+      LEFT JOIN resorts res ON r.resort_id = res.id
+      LEFT JOIN room_types rt ON r.room_type_id = rt.id
+      ORDER BY b.created_at DESC
+    `;
+    const { rows } = await pool.query(sql);
+    res.json(rows);
+  } catch (error) {
+    console.error("❌ Lỗi booking admin:", error);
+    res.status(500).json({ error: "Lỗi server: " + error.message });
+  }
+});
 
-// ===== API HỦY ĐẶT PHÒNG =====
+// =============================================================
+// ===== 2. API DUYỆT/HỦY ĐƠN (ĐÃ CÓ TRIGGER HỖ TRỢ) =====
+// =============================================================
+app.put("/api/admin/bookings/:id/status", authorize(["admin", "staff"]), async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  // Validate đầu vào
+  if (!['confirmed', 'cancelled', 'checked_in', 'checked_out'].includes(status)) {
+    return res.status(400).json({ error: "Trạng thái không hợp lệ" });
+  }
+
+  try {
+    // Chỉ cần update Booking, Trigger trong DB sẽ tự update Room
+    const sql = `
+      UPDATE bookings 
+      SET status = $1, updated_at = NOW() 
+      WHERE id = $2 
+      RETURNING id, status
+    `;
+    const { rows } = await pool.query(sql, [status, id]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: "Không tìm thấy đơn đặt phòng" });
+    }
+
+    res.json({ message: "Cập nhật thành công!", booking: rows[0] });
+
+  } catch (error) {
+    console.error("❌ Lỗi cập nhật:", error.message);
+    res.status(500).json({ error: "Lỗi server: " + error.message });
+  }
+});
+app.put("/api/admin/bookings/:id/status", authorize(["admin", "staff"]), async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  // 1. Cập nhật Booking
+  const bookingRes = await pool.query(
+    `UPDATE bookings SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING room_id, status`,
+    [status, id]
+  );
+  
+  if (bookingRes.rows.length === 0) return res.status(404).json({ error: "Lỗi" });
+
+  // 2. TỰ CẬP NHẬT LUÔN TRẠNG THÁI PHÒNG (Không cần Trigger nữa)
+  const roomId = bookingRes.rows[0].room_id;
+  if (status === 'confirmed') {
+      await pool.query("UPDATE rooms SET status = 'reserved' WHERE id = $1", [roomId]);
+  } else if (status === 'cancelled') {
+      await pool.query("UPDATE rooms SET status = 'available' WHERE id = $1", [roomId]);
+  }
+
+  res.json({ message: "Thành công", booking: bookingRes.rows[0] });
+});
+
+// ===== API HỦY ĐẶT PHÒNG (CÓ CHECK 24H) =====
 app.put("/api/bookings/:id/cancel", authorize(['guest']), async (req, res) => {
   const { userId } = req.user;
   const { id } = req.params;
 
   try {
-    const sql = `
+    // BƯỚC 1: Lấy thông tin created_at để kiểm tra thời gian
+    // Bạn có cột: id, user_id, status, created_at -> Đủ dùng
+    const checkSql = `
+      SELECT id, user_id, status, created_at 
+      FROM bookings 
+      WHERE id = $1
+    `;
+    const checkResult = await pool.query(checkSql, [id]);
+
+    if (checkResult.rowCount === 0) {
+      return res.status(404).json({ error: "Không tìm thấy đặt phòng." });
+    }
+
+    const booking = checkResult.rows[0];
+
+    // Check quyền chính chủ
+    if (booking.user_id !== userId) {
+      return res.status(403).json({ error: "Bạn không có quyền hủy đơn này." });
+    }
+
+    // Check trạng thái
+    if (booking.status !== 'pending' && booking.status !== 'confirmed') {
+      return res.status(400).json({ error: "Không thể hủy đơn này (đã hoàn thành hoặc đã hủy)." });
+    }
+
+    // --- LOGIC 24H DỰA TRÊN CỘT CREATED_AT CỦA BẠN ---
+    const createdTime = new Date(booking.created_at).getTime(); 
+    const currentTime = new Date().getTime();
+    const hoursDiff = (currentTime - createdTime) / (1000 * 60 * 60);
+
+    if (hoursDiff >= 24) {
+      return res.status(400).json({ 
+        error: "Đã quá 24h kể từ lúc đặt (created_at). Bạn không thể hủy vé này nữa." 
+      });
+    }
+
+    // BƯỚC 2: Cập nhật status
+    // Cập nhật cả updated_at để biết thời điểm hủy
+    const updateSql = `
       UPDATE bookings
-      SET status = 'cancelled'
-      WHERE id = $1 AND user_id = $2 AND (status = 'pending' OR status = 'confirmed')
-      RETURNING id, status;
+      SET status = 'cancelled', updated_at = NOW()
+      WHERE id = $1
+      RETURNING id, status, updated_at;
     `;
 
-    const { rows, rowCount } = await pool.query(sql, [id, userId]);
-
-    if (rowCount === 0) {
-      return res.status(404).json({ error: "Không tìm thấy đặt phòng hoặc không thể hủy." });
-    }
+    const { rows } = await pool.query(updateSql, [id]);
 
     res.status(200).json({
       message: "Hủy đặt phòng thành công!",
@@ -805,8 +959,8 @@ app.put("/api/bookings/:id/cancel", authorize(['guest']), async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ Lỗi khi hủy đặt phòng:", error);
-    res.status(500).json({ error: "Lỗi server khi hủy đặt phòng." });
+    console.error("❌ Lỗi:", error);
+    res.status(500).json({ error: "Lỗi server." });
   }
 });
 

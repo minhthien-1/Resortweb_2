@@ -407,36 +407,33 @@
         <p>&copy; 2025 Resort Booking. All rights reserved.</p>
     </footer>
 
-    <script>
+   <script>
+        // ===== 1. KHAI BÁO ẢNH DỰ PHÒNG DẠNG SVG (GIỐNG TRANG CHỦ) =====
+        // Cách này giúp không bao giờ bị lỗi 404 vì ảnh được vẽ bằng code
+        const PLACEHOLDER_DATA_URL = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22300%22 height=%22200%22%3E%3Crect fill=%22%23e0e0e0%22 width=%22300%22 height=%22200%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 text-anchor=%22middle%22 dy=%22.3em%22 fill=%22%23999%22 font-size=%2216%22 font-family=%22Arial%22%3ENo Image%3C/text%3E%3C/svg%3E';
+
         // ===== AUTH MANAGEMENT =====
         function updateAuthNavbar() {
             const token = localStorage.getItem('token');
             const username = localStorage.getItem('username');
-
-            console.log('updateAuthNavbar called - Token:', token, 'Username:', username);
-
             const authButtons = document.getElementById('auth-buttons');
             const userSection = document.getElementById('user-section');
             const usernameDisplay = document.getElementById('username-display');
 
             if (token && username) {
-                console.log('User logged in');
                 if (authButtons) authButtons.classList.add('hidden');
                 if (userSection) {
                     userSection.classList.add('active');
                     if (usernameDisplay) usernameDisplay.textContent = username;
                 }
             } else {
-                console.log('User not logged in');
                 if (authButtons) authButtons.classList.remove('hidden');
                 if (userSection) userSection.classList.remove('active');
             }
         }
 
         function logout() {
-            localStorage.removeItem('token');
-            localStorage.removeItem('username');
-            updateAuthNavbar();
+            localStorage.clear();
             window.location.href = 'login.html';
         }
 
@@ -446,31 +443,35 @@
             const token = localStorage.getItem('token');
             const container = document.getElementById('bookings-container');
 
-            // Cập nhật navbar khi trang load
             updateAuthNavbar();
 
-            // Gán sự kiện cho nút đăng xuất
             const logoutBtn = document.getElementById('logout-btn');
-            if (logoutBtn) {
-                logoutBtn.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    logout();
-                });
+            if (logoutBtn) logoutBtn.addEventListener('click', (e) => { e.preventDefault(); logout(); });
+
+            if (!token) { window.location.href = 'login.html'; return; }
+
+            // ===================================================================
+            // 2. HÀM XỬ LÝ ĐƯỜNG DẪN ẢNH (COPY TỪ HOME.HTML SANG)
+            // ===================================================================
+            function resolveImageUrl(url) {
+                // Nếu không có url -> Trả về ảnh SVG dự phòng
+                if (!url) return PLACEHOLDER_DATA_URL;
+                
+                // Nếu là link online (http/https) -> Giữ nguyên
+                if (/^https?:\/\//i.test(url)) return url;
+                
+                // Nếu là đường dẫn tuyệt đối (bắt đầu bằng /) -> Thêm domain
+                if (url.startsWith('/')) return API_BASE + url;
+                
+                // Nếu chỉ là tên file (ví dụ: image.png) -> Thêm /uploads/
+                return API_BASE + '/uploads/' + url;
             }
 
-            if (!token) {
-                window.location.href = 'login.html';
-                return;
-            }
-            
             // ===================================================================
             // HÀM HỦY ĐẶT PHÒNG
             // ===================================================================
             async function cancelBooking(bookingId, buttonElement) {
-                // Hỏi xác nhận người dùng
-                if (!confirm('Bạn có chắc chắn muốn hủy đặt phòng này không?')) {
-                    return;
-                }
+                if (!confirm('Bạn có chắc chắn muốn hủy đặt phòng này không?')) return;
 
                 try {
                     buttonElement.disabled = true;
@@ -478,23 +479,19 @@
 
                     const response = await fetch(`${API_BASE}/api/bookings/${bookingId}/cancel`, {
                         method: 'PUT',
-                        headers: {
-                            'Authorization': `Bearer ${token}`
-                        }
+                        headers: { 'Authorization': `Bearer ${token}` }
                     });
 
                     const result = await response.json();
 
-                    if (!response.ok) {
-                        throw new Error(result.error || 'Hủy thất bại, vui lòng thử lại.');
-                    }
+                    if (!response.ok) throw new Error(result.error || 'Hủy thất bại.');
 
-                    // Cập nhật giao diện ngay lập tức
+                    // Update giao diện
                     const card = buttonElement.closest('.booking-card');
                     const statusElement = card.querySelector('.status');
                     statusElement.textContent = 'Đã hủy';
                     statusElement.className = 'status status-cancelled';
-                    buttonElement.remove(); // Xóa nút sau khi hủy thành công
+                    buttonElement.remove(); 
 
                 } catch (error) {
                     alert(`Lỗi: ${error.message}`);
@@ -513,7 +510,7 @@
                     container.innerHTML = `
                         <div class="no-bookings">
                             <h3>Bạn chưa có chuyến đi nào</h3>
-                            <p>Hãy bắt đầu hành trình khám phá và đặt ngay một kỳ nghỉ tuyệt vời!</p>
+                            <p>Hãy bắt đầu hành trình khám phá ngay!</p>
                             <a href="home.html" class="btn-home">Tìm kiếm Resort</a>
                         </div>
                     `;
@@ -532,24 +529,38 @@
                     const card = document.createElement('div');
                     card.className = 'booking-card';
 
-                    const formattedCheckIn = new Date(booking.check_in).toLocaleDateString('vi-VN');
-                    const formattedCheckOut = new Date(booking.check_out).toLocaleDateString('vi-VN');
-                    const formattedPrice = new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(booking.total_amount);
+                    const checkIn = new Date(booking.check_in).toLocaleDateString('vi-VN');
+                    const checkOut = new Date(booking.check_out).toLocaleDateString('vi-VN');
+                    const price = new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(booking.total_amount);
                     const statusInfo = statusMap[booking.status] || { text: booking.status, class: '' };
-                    const imageUrl = booking.images_url && booking.images_url.length > 0
-                        ? `${API_BASE}/uploads/${booking.images_url[0]}`
-                        : 'Assets/placeholder.jpg';
 
-                    // Chỉ hiển thị nút hủy nếu trạng thái cho phép
-                    const canCancel = booking.status === 'pending' || booking.status === 'confirmed';
+                    // --- XỬ LÝ ẢNH (DÙNG LOGIC MỚI) ---
+                    let imgUrl = PLACEHOLDER_DATA_URL;
+                    
+                    // Backend mới trả về mảng sạch sẽ
+                    if (Array.isArray(booking.images_url) && booking.images_url.length > 0) {
+                        imgUrl = resolveImageUrl(booking.images_url[0]);
+                    }
+
+                    // --- LOGIC 24H ---
+                    const createdTime = new Date(booking.created_at).getTime(); 
+                    const now = new Date().getTime();
+                    const hoursPassed = (now - createdTime) / (1000 * 60 * 60);
+                    const canCancel = (booking.status === 'pending' || booking.status === 'confirmed') && hoursPassed < 24;
+
                     const actionsHTML = canCancel
                         ? `<div class="card-actions">
                                <button class="btn-cancel" data-booking-id="${booking.id}">Hủy đặt phòng</button>
+                               <small style="display:block; margin-top:5px; color:#666; font-style:italic;">
+                                   (Còn ${Math.floor(24 - hoursPassed)}h để hủy)
+                               </small>
                            </div>`
                         : '';
 
+                    // THÊM ONERROR DÙNG BIẾN PLACEHOLDER_DATA_URL
                     card.innerHTML = `
-                        <img src="${imageUrl}" alt="${booking.resort_name}" class="resort-image">
+                        <img src="${imgUrl}" alt="${booking.resort_name}" class="resort-image" 
+                             onerror="this.src='${PLACEHOLDER_DATA_URL}'">
                         <div class="booking-details">
                             <div class="card-header">
                                 <h3 class="resort-name">${booking.resort_name}</h3>
@@ -557,9 +568,9 @@
                             </div>
                             <div class="booking-info">
                                 <p><i class="fas fa-barcode"></i>Mã đặt phòng: <strong class="booking-code">${booking.booking_code}</strong></p>
-                                <p><i class="fas fa-calendar-check"></i>Nhận phòng: <strong>${formattedCheckIn}</strong></p>
-                                <p><i class="fas fa-calendar-times"></i>Trả phòng: <strong>${formattedCheckOut}</strong></p>
-                                <p><i class="fas fa-money-bill-wave"></i>Tổng thanh toán: <strong>${formattedPrice}</strong></p>
+                                <p><i class="fas fa-calendar-check"></i>Nhận phòng: <strong>${checkIn}</strong></p>
+                                <p><i class="fas fa-calendar-times"></i>Trả phòng: <strong>${checkOut}</strong></p>
+                                <p><i class="fas fa-money-bill-wave"></i>Tổng thanh toán: <strong>${price}</strong></p>
                             </div>
                             ${actionsHTML}
                         </div>
@@ -567,40 +578,30 @@
                     container.appendChild(card);
                 });
 
-                // Gắn sự kiện cho các nút hủy vừa được tạo
-                document.querySelectorAll('.btn-cancel').forEach(button => {
-                    button.addEventListener('click', (e) => {
-                        const bookingId = e.target.dataset.bookingId;
-                        cancelBooking(bookingId, e.target);
-                    });
+                document.querySelectorAll('.btn-cancel').forEach(btn => {
+                    btn.addEventListener('click', (e) => cancelBooking(e.target.dataset.bookingId, e.target));
                 });
             }
 
-            // ===================================================================
-            // HÀM TẢI VÀ RENDER BOOKINGS
-            // ===================================================================
-            async function fetchAndRenderBookings() {
-                try {
-                    const response = await fetch(`${API_BASE}/api/my-bookings`, {
-                        headers: { 'Authorization': `Bearer ${token}` }
-                    });
-                    if (!response.ok) {
-                        if (response.status === 401 || response.status === 403) {
-                            localStorage.clear();
-                            window.location.href = 'login.html';
-                        }
-                        throw new Error('Không thể tải lịch sử đặt phòng.');
+            try {
+                const response = await fetch(`${API_BASE}/api/my-bookings`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                if (!response.ok) {
+                    if (response.status === 401 || response.status === 403) {
+                        logout();
+                        return;
                     }
-                    const bookings = await response.json();
-                    renderBookings(bookings);
-                } catch (error) {
-                    console.error('Lỗi:', error);
-                    container.innerHTML = `<p style="text-align: center; color: red;">${error.message}</p>`;
+                    throw new Error('Lỗi tải dữ liệu.');
                 }
+                
+                const bookings = await response.json();
+                renderBookings(bookings);
+            } catch (error) {
+                console.error(error);
+                container.innerHTML = `<p style="text-align: center; color: red;">${error.message}</p>`;
             }
-
-            // Chạy hàm chính
-            fetchAndRenderBookings();
         });
     </script>
 </body>

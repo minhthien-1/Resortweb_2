@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - Quản lý Đặt phòng</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background-color: #f4f6f9; margin: 0; }
+        .admin-container { max-width: 1200px; margin: 40px auto; padding: 20px; background: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        
+        /* Header có nút Back */
+        .header-row { display: flex; align-items: center; gap: 15px; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 2px solid #3498db; }
+        .btn-back { width: 40px; height: 40px; border-radius: 50%; background-color: #e5e7eb; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: 0.2s; color: #4b5563; }
+        .btn-back:hover { background-color: #d1d5db; }
+        h1 { margin: 0; color: #2c3e50; font-size: 1.8rem; }
+
+        /* Bảng */
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: middle; }
+        th { background-color: #f8f9fa; font-weight: 600; color: #555; }
+        tr:hover { background-color: #f8f9fa; }
+
+        /* Badge trạng thái */
+        .status-badge { padding: 6px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; white-space: nowrap; }
+        .status-pending { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+        .status-confirmed { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .status-cancelled { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .status-checked_in { background-color: #cce5ff; color: #004085; border: 1px solid #b8daff; }
+
+        /* Nút hành động */
+        .action-group { display: flex; gap: 8px; }
+        .action-btn { padding: 8px 12px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9rem; font-weight: 500; display: flex; align-items: center; gap: 5px; transition: 0.2s; color: white; }
+        .btn-confirm { background-color: #28a745; }
+        .btn-confirm:hover { background-color: #218838; transform: translateY(-1px); }
+        .btn-cancel { background-color: #dc3545; }
+        .btn-cancel:hover { background-color: #c82333; transform: translateY(-1px); }
+        
+        .loading { text-align: center; padding: 30px; color: #666; font-style: italic; }
+    </style>
+</head>
+<body>
+
+    <div class="admin-container">
+        <div class="header-row">
+            <button onclick="window.history.back()" class="btn-back" title="Quay lại">
+                <i class="fas fa-arrow-left"></i>
+            </button>
+            <h1>Quản lý Đặt phòng</h1>
+            <button onclick="fetchBookings()" style="margin-left: auto; padding: 8px 15px; background: #3498db; color: white; border:none; border-radius:6px; cursor:pointer;">
+                <i class="fas fa-sync-alt"></i> Tải lại
+            </button>
+        </div>
+        
+        <div style="overflow-x: auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Mã / Ngày đặt</th>
+                        <th>Khách hàng</th>
+                        <th>Phòng / Resort</th>
+                        <th>Thời gian</th>
+                        <th>Tổng tiền</th>
+                        <th>Trạng thái</th>
+                        <th>Hành động</th>
+                    </tr>
+                </thead>
+                <tbody id="booking-list">
+                    <tr><td colspan="7" class="loading"><i class="fas fa-spinner fa-spin"></i> Đang tải dữ liệu...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+    const API_BASE = "http://localhost:5500";
+    const token = localStorage.getItem('token');
+
+    // 1. Kiểm tra quyền Admin
+    if (!token) {
+        alert("Vui lòng đăng nhập!");
+        window.location.href = '/login.html';
+    }
+
+    // 2. Helper định dạng
+    function formatCurrency(amount) {
+        return new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(amount);
+    }
+    function formatDate(dateString) {
+        if (!dateString) return '';
+        return new Date(dateString).toLocaleDateString('vi-VN');
+    }
+
+    // 3. Tải danh sách
+    async function fetchBookings() {
+        try {
+            const res = await fetch(`${API_BASE}/api/admin/bookings`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!res.ok) throw new Error("Lỗi tải dữ liệu");
+            const bookings = await res.json();
+            renderTable(bookings);
+        } catch (error) {
+            document.getElementById('booking-list').innerHTML = `<tr><td colspan="7" style="color:red; text-align:center;">❌ ${error.message}</td></tr>`;
+        }
+    }
+
+    // 4. Hiển thị bảng (Đã khớp tên biến với API mới)
+    function renderTable(bookings) {
+        const tbody = document.getElementById('booking-list');
+        tbody.innerHTML = '';
+
+        if (bookings.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:20px;">Chưa có đơn nào.</td></tr>';
+            return;
+        }
+
+        bookings.forEach(b => {
+            let badgeClass = 'status-pending';
+            let statusText = b.status;
+
+            // Dịch trạng thái & màu sắc
+            if (b.status === 'pending') { statusText = '⏳ Chờ xác nhận'; badgeClass = 'status-pending'; }
+            else if (b.status === 'confirmed') { statusText = '✅ Đã xác nhận'; badgeClass = 'status-confirmed'; }
+            else if (b.status === 'cancelled') { statusText = '❌ Đã hủy'; badgeClass = 'status-cancelled'; }
+            else if (b.status === 'checked_in') { statusText = '🔑 Đang ở'; badgeClass = 'status-checked_in'; }
+
+            // Nút hành động
+            let actions = '';
+            if (b.status === 'pending') {
+                actions = `
+                    <button class="action-btn btn-confirm" onclick="updateStatus(${b.id}, 'confirmed')">✔ Duyệt</button>
+                    <button class="action-btn btn-cancel" onclick="updateStatus(${b.id}, 'cancelled')">✖ Hủy</button>
+                `;
+            } else if (b.status === 'confirmed') {
+                 actions = `<small style="color:green">Đã duyệt</small>`;
+            } else {
+                 actions = `<small style="color:gray">Hoàn tất</small>`;
+            }
+
+            // QUAN TRỌNG: b.customer_name khớp với API Backend
+            const row = `
+                <tr>
+                    <td><strong>${b.booking_code}</strong><br><small style="color:#666">${formatDate(b.created_at)}</small></td>
+                    <td>
+                        <strong>${b.customer_name}</strong><br>
+                        <small>${b.customer_phone}</small>
+                    </td>
+                    <td>
+                        <span style="color:#2980b9; font-weight:600">${b.resort_name}</span><br>
+                        <small>${b.room_type}</small>
+                    </td>
+                    <td>${formatDate(b.check_in)} <br>⬇<br> ${formatDate(b.check_out)}</td>
+                    <td style="color:#d35400; font-weight:bold;">${formatCurrency(b.total_amount)}</td>
+                    <td><span class="status-badge ${badgeClass}">${statusText}</span></td>
+                    <td>${actions}</td>
+                </tr>
+            `;
+            tbody.innerHTML += row;
+        });
+    }
+
+    // 5. Hàm bấm nút
+    async function updateStatus(id, newStatus) {
+        if (!confirm(newStatus === 'confirmed' ? "Duyệt đơn này?" : "Hủy đơn này?")) return;
+
+        try {
+            const res = await fetch(`${API_BASE}/api/admin/bookings/${id}/status`, {
+                method: 'PUT',
+                headers: { 
+                    'Content-Type': 'application/json', 
+                    'Authorization': `Bearer ${token}` 
+                },
+                body: JSON.stringify({ status: newStatus })
+            });
+
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "Lỗi cập nhật");
+
+            alert("✅ Thành công!");
+            fetchBookings(); // Tải lại bảng
+        } catch (error) {
+            alert("❌ Lỗi: " + error.message);
+        }
+    }
+
+    fetchBookings();
+</script>
+</body>
+</html>
