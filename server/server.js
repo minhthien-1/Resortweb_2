@@ -509,7 +509,7 @@ app.get("/api/room-types", async (req, res) => {
   }
 });
 
-// ✅ GET danh sách phòng admin (với room_type_id)
+// danh sách phòng admin 
 app.get("/api/admin/rooms", authorize(["admin", "staff"]), async (req, res) => {
   try {
     const result = await pool.query(
@@ -561,7 +561,7 @@ app.get("/api/admin/rooms/:id", authorize(["admin", "staff"]), async (req, res) 
   }
 });
 
-// ✅ POST tạo phòng mới (LƯU GIÁ VÀO room_details)
+
 app.post("/api/admin/rooms", authorize(["admin", "staff"]), upload.array('images'), async (req, res) => {
   try {
     const { resort_id, room_type_id, status, category, location, address, description, num_bed, price_per_night } = req.body;
@@ -582,8 +582,6 @@ app.post("/api/admin/rooms", authorize(["admin", "staff"]), upload.array('images
         [resort_id, room_type_id, status || "available", category || "standard", location, address || ""]
       );
       const roomId = roomResult.rows[0].id;
-
-      // ✅ LƯU GIÁ VÀO room_details
       await client.query(
         `INSERT INTO room_details (room_id, description, features, images_url, num_bed, price_per_night, created_at) 
          VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
@@ -604,7 +602,7 @@ app.post("/api/admin/rooms", authorize(["admin", "staff"]), upload.array('images
   }
 });
 
-// ✅ PUT cập nhật phòng (LƯU GIÁ VÀO room_details)
+
 app.put("/api/admin/rooms/:id", authorize(["admin", "staff"]), upload.array('images'), async (req, res) => {
   try {
     const { id } = req.params;
@@ -844,60 +842,75 @@ app.get("/api/admin/bookings", authorize(["admin", "staff"]), async (req, res) =
   }
 });
 
+
 // =============================================================
-// ===== 2. API DUYỆT/HỦY ĐƠN (ĐÃ CÓ TRIGGER HỖ TRỢ) =====
+// ===== 3. API DUYỆT/HỦY ĐƠN (LOGIC "THỦ CÔNG" - CHẮC CHẮN CHẠY) =====
 // =============================================================
 app.put("/api/admin/bookings/:id/status", authorize(["admin", "staff"]), async (req, res) => {
   const { id } = req.params;
-  const { status } = req.body;
+  const { status } = req.body; // 'confirmed' hoặc 'cancelled'
 
-  // Validate đầu vào
-  if (!['confirmed', 'cancelled', 'checked_in', 'checked_out'].includes(status)) {
+  // 1. Kiểm tra trạng thái hợp lệ
+  const validStatuses = ['confirmed', 'cancelled', 'checked_in', 'checked_out'];
+  if (!validStatuses.includes(status)) {
     return res.status(400).json({ error: "Trạng thái không hợp lệ" });
   }
 
-  try {
-    // Chỉ cần update Booking, Trigger trong DB sẽ tự update Room
-    const sql = `
-      UPDATE bookings 
-      SET status = $1, updated_at = NOW() 
-      WHERE id = $2 
-      RETURNING id, status
-    `;
-    const { rows } = await pool.query(sql, [status, id]);
+  // Dùng Client để chạy Transaction (Giao dịch) -> An toàn tuyệt đối
+  const client = await pool.connect();
 
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Không tìm thấy đơn đặt phòng" });
+  try {
+    await client.query('BEGIN'); // --- BẮT ĐẦU ---
+
+    // 2. Cập nhật trạng thái BOOKING
+    const bookingRes = await client.query(
+      `UPDATE bookings 
+       SET status = $1, updated_at = NOW() 
+       WHERE id = $2 
+       RETURNING room_id, status`,
+      [status, id]
+    );
+
+    if (bookingRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: "Không tìm thấy đơn hàng" });
     }
 
-    res.json({ message: "Cập nhật thành công!", booking: rows[0] });
+    const roomId = bookingRes.rows[0].room_id;
+
+    // 3. Tự tay cập nhật trạng thái PHÒNG (Không cần chờ Trigger)
+    let newRoomStatus = null;
+
+    if (status === 'confirmed') {
+        newRoomStatus = 'reserved';  // Duyệt -> Phòng thành Đã đặt
+    } else if (status === 'cancelled') {
+        newRoomStatus = 'available'; // Hủy -> Phòng thành Trống
+    } else if (status === 'checked_in') {
+        newRoomStatus = 'occupied';  // Check-in -> Phòng thành Đang ở
+    } else if (status === 'checked_out') {
+        newRoomStatus = 'available'; // Check-out -> Phòng thành Trống
+    }
+
+    // Nếu có trạng thái phòng mới thì cập nhật luôn
+    if (newRoomStatus) {
+        await client.query(
+            `UPDATE rooms SET status = $1 WHERE id = $2`,
+            [newRoomStatus, roomId]
+        );
+        console.log(`👉 Đã cập nhật phòng ${roomId} sang trạng thái: ${newRoomStatus}`);
+    }
+
+    await client.query('COMMIT'); // --- LƯU THAY ĐỔI ---
+    
+    res.json({ message: "Cập nhật thành công!", booking: bookingRes.rows[0] });
 
   } catch (error) {
-    console.error("❌ Lỗi cập nhật:", error.message);
+    await client.query('ROLLBACK'); // --- GẶP LỖI THÌ HOÀN TÁC HẾT ---
+    console.error("❌ Lỗi Backend:", error);
     res.status(500).json({ error: "Lỗi server: " + error.message });
+  } finally {
+    client.release();
   }
-});
-app.put("/api/admin/bookings/:id/status", authorize(["admin", "staff"]), async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
-
-  // 1. Cập nhật Booking
-  const bookingRes = await pool.query(
-    `UPDATE bookings SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING room_id, status`,
-    [status, id]
-  );
-  
-  if (bookingRes.rows.length === 0) return res.status(404).json({ error: "Lỗi" });
-
-  // 2. TỰ CẬP NHẬT LUÔN TRẠNG THÁI PHÒNG (Không cần Trigger nữa)
-  const roomId = bookingRes.rows[0].room_id;
-  if (status === 'confirmed') {
-      await pool.query("UPDATE rooms SET status = 'reserved' WHERE id = $1", [roomId]);
-  } else if (status === 'cancelled') {
-      await pool.query("UPDATE rooms SET status = 'available' WHERE id = $1", [roomId]);
-  }
-
-  res.json({ message: "Thành công", booking: bookingRes.rows[0] });
 });
 
 // ===== API HỦY ĐẶT PHÒNG (CÓ CHECK 24H) =====
