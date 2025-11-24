@@ -558,29 +558,36 @@ function initializeUser() {
 }
 
 // Load user profile từ API
+// Load user profile từ API
 async function loadUserProfile() {
     try {
         console.log('📡 Đang tải profile từ API:', `${API_BASE_URL}/users/${currentUserId}`);
         
         const response = await fetch(`${API_BASE_URL}/users/${currentUserId}`);
+        
+        // Kiểm tra HTTP status code
+        if (!response.ok) {
+            throw new Error(`HTTP Error: ${response.status}`);
+        }
+        
         const result = await response.json();
-
         console.log('📥 API Response:', result);
 
-        if (result.status && result.data) {
-            currentUser = result.data;
+        // ✅ FIX: Kiểm tra xem result có phải user object không (có id và username)
+        if (result && result.id && result.username) {
+            currentUser = result;
             
             // Cập nhật localStorage
             localStorage.setItem('email', currentUser.email);
             localStorage.setItem('username', currentUser.username);
             localStorage.setItem('fullname', currentUser.full_name);
-            localStorage.setItem('phone', currentUser.phone);
+            localStorage.setItem('phone', currentUser.phone || '');
             
             displayProfile(currentUser);
             console.log('✅ Profile loaded successfully');
         } else {
-            showError('Không thể tải thông tin tài khoản: ' + (result.message || 'Unknown error'));
-            console.error('❌ Error from API:', result);
+            showError('Dữ liệu không hợp lệ từ server');
+            console.error('❌ Invalid response format:', result);
         }
     } catch (error) {
         console.error('❌ Error loading profile:', error);

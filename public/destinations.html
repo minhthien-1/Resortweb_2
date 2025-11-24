@@ -368,20 +368,29 @@
       }
 
       // ===== FETCH ROOMS =====
-      async function fetchRooms() {
-        try {
-          const response = await fetch(`${API_BASE}/api/rooms?location=${locationParam}`);
-          if (!response.ok) throw new Error('Network error');
-          allRooms = await response.json();
-          filteredRooms = allRooms;
-          populateRoomTypes();
-          updateStats();
-          renderRooms();
-        } catch (error) {
-          console.error('Error:', error);
-          allRooms = [];
-        }
+    async function fetchRooms() {
+      try {
+        const response = await fetch(`${API_BASE}/api/rooms`);
+        if (!response.ok) throw new Error('Network error');
+        
+        let allRoomsFromAPI = await response.json();
+        
+        allRooms = allRoomsFromAPI.filter(room => {
+          return room.location === locationParam;
+        });
+        
+        filteredRooms = allRooms;
+        populateRoomTypes();
+        updateStats();
+        renderRooms();
+        
+        console.log(`✅ Filtered ${allRooms.length} rooms for location: ${locationParam}`);
+      } catch (error) {
+        console.error('Error:', error);
+        allRooms = [];
       }
+    }
+
 
       // ===== POPULATE ROOM TYPES =====
       function populateRoomTypes() {
